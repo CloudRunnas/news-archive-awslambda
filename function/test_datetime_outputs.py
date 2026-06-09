@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
-import function.main as main
+try:
+    import function.main as main
+except ModuleNotFoundError:
+    import main  # noqa: F401
+
+_MAIN = main.__name__
 
 _BERLIN = ZoneInfo("Europe/Berlin")
 
@@ -40,12 +45,12 @@ class DatetimeOutputTests(unittest.TestCase):
             "10-06-2026",
         )
 
-    @patch("function.main._run_async", new_callable=AsyncMock, return_value=([], 0))
-    @patch("function.main._ensure_bucket_exists")
-    @patch("function.main._resolve_bucket_name", return_value="test-bucket")
-    @patch("function.main._load_feed_list", return_value=[])
-    @patch("function.main.boto3")
-    @patch("function.main.datetime")
+    @patch(f"{_MAIN}._run_async", new_callable=AsyncMock, return_value=([], 0))
+    @patch(f"{_MAIN}._ensure_bucket_exists")
+    @patch(f"{_MAIN}._resolve_bucket_name", return_value="test-bucket")
+    @patch(f"{_MAIN}._load_feed_list", return_value=[])
+    @patch(f"{_MAIN}.boto3")
+    @patch(f"{_MAIN}.datetime")
     def test_handler_uses_berlin_date_prefix(
         self,
         mock_datetime,
@@ -74,9 +79,9 @@ class DatetimeOutputTests(unittest.TestCase):
 
     async def _run_process_one_feed_assertions(self, fixed: datetime) -> None:
         with (
-            patch("function.main.datetime") as mock_datetime,
-            patch("function.main.secrets.token_hex", return_value="abcd"),
-            patch("function.main.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+            patch(f"{_MAIN}.datetime") as mock_datetime,
+            patch(f"{_MAIN}.secrets.token_hex", return_value="abcd"),
+            patch(f"{_MAIN}.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
         ):
             mock_datetime.now.return_value = fixed
             mock_datetime.side_effect = (

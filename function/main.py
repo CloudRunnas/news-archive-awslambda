@@ -6,7 +6,7 @@ import re
 import secrets
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any
 from urllib.parse import urlparse
 
@@ -17,7 +17,22 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-_TZ = ZoneInfo("Europe/Berlin")
+
+def _load_berlin_tz() -> ZoneInfo:
+    try:
+        import tzdata  # noqa: F401
+    except ImportError:
+        pass
+    try:
+        return ZoneInfo("Europe/Berlin")
+    except ZoneInfoNotFoundError as e:
+        raise RuntimeError(
+            "Zeitzone Europe/Berlin nicht verfügbar. "
+            "Das Paket tzdata muss in requirements.txt enthalten sein."
+        ) from e
+
+
+_TZ = _load_berlin_tz()
 
 _FEED_LIST_PATH = Path(__file__).resolve().parent / "feeds.json"
 _DEFAULT_FETCH_TIMEOUT_S = 30
