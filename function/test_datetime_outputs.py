@@ -28,6 +28,18 @@ class DatetimeOutputTests(unittest.TestCase):
 
         self.assertEqual(berlin_time.strftime("%d-%m-%Y"), "16-01-2026")
 
+    def test_date_prefix_at_10_june_0019_berlin_not_utc(self):
+        """10.06. 00:19 Berlin — UTC-Code würde fälschlich 09-06 liefern."""
+        berlin_time = datetime(2026, 6, 10, 0, 19, tzinfo=_BERLIN)
+        utc_same_instant = datetime(2026, 6, 9, 22, 19, tzinfo=timezone.utc)
+
+        self.assertEqual(berlin_time.strftime("%d-%m-%Y"), "10-06-2026")
+        self.assertEqual(utc_same_instant.strftime("%d-%m-%Y"), "09-06-2026")
+        self.assertEqual(
+            utc_same_instant.astimezone(_BERLIN).strftime("%d-%m-%Y"),
+            "10-06-2026",
+        )
+
     @patch("function.main._run_async", new_callable=AsyncMock, return_value=([], 0))
     @patch("function.main._ensure_bucket_exists")
     @patch("function.main._resolve_bucket_name", return_value="test-bucket")
