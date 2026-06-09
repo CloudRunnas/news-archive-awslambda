@@ -1,0 +1,105 @@
+import asyncio
+import json
+import unittest
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
+
+import function.main as main
+
+_BERLIN = ZoneInfo("Europe/Berlin")
+
+
+class DatetimeOutputTests(unittest.TestCase):
+    def test_module_timezone_is_europe_berlin(self):
+        self.assertEqual(str(main._TZ), "Europe/Berlin")
+
+    def test_date_prefix_follows_berlin_at_utc_day_boundary(self):
+        """22:00 UTC am 8.6. = 00:00 Berlin am 9.6. (CEST) — nicht UTC-Datum 08-06."""
+        utc_time = datetime(2026, 6, 8, 22, 0, tzinfo=timezone.utc)
+        berlin_time = utc_time.astimezone(_BERLIN)
+
+        self.assertEqual(berlin_time.strftime("%d-%m-%Y"), "09-06-2026")
+        self.assertNotEqual(utc_time.strftime("%d-%m-%Y"), "09-06-2026")
+
+    def test_date_prefix_follows_berlin_in_winter_time(self):
+        utc_time = datetime(2026, 1, 15, 23, 30, tzinfo=timezone.utc)
+        berlin_time = utc_time.astimezone(_BERLIN)
+
+        self.assertEqual(berlin_time.strftime("%d-%m-%Y"), "16-01-2026")
+
+    @patch("function.main._run_async", new_callable=AsyncMock, return_value=([], 0))
+    @patch("function.main._ensure_bucket_exists")
+    @patch("function.main._resolve_bucket_name", return_value="test-bucket")
+    @patch("function.main._load_feed_list", return_value=[])
+    @patch("function.main.boto3")
+    @patch("function.main.datetime")
+    def test_handler_uses_berlin_date_prefix(
+        self,
+        mock_datetime,
+        mock_boto3,
+        _mock_load,
+        _mock_bucket,
+        _mock_ensure,
+        mock_run_async,
+    ):
+        fixed = datetime(2026, 6, 9, 1, 0, tzinfo=_BERLIN)
+        mock_datetime.now.return_value = fixed
+        mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        mock_boto3.client.return_value = MagicMock()
+
+        response = main.handler({}, None)
+
+        self.assertEqual(response["statusCode"], 200)
+        mock_run_async.assert_awaited_once()
+        date_prefix = mock_run_async.call_args.args[5]
+        self.assertEqual(date_prefix, "09-06-2026")
+        mock_datetime.now.assert_called_with(main._TZ)
+
+    def test_process_one_feed_fetched_at_uses_berlin(self):
+        fixed = datetime(2026, 6, 9, 0, 15, tzinfo=_BERLIN)
+        asyncio.run(self._run_process_one_feed_assertions(fixed))
+
+    async def _run_process_one_feed_assertions(self, fixed: datetime) -> None:
+        with (
+            patch("function.main.datetime") as mock_datetime,
+            patch("function.main.secrets.token_hex", return_value="abcd"),
+            patch("function.main.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+        ):
+            mock_datetime.now.return_value = fixed
+            mock_datetime.side_effect = (
+                lambda *args, **kwargs: datetime(*args, **kwargs)
+            )
+
+            client = MagicMock()
+            response = MagicMock()
+            response.status_code = 200
+            response.content = b"<rss/>"
+            response.headers = {"Content-Type": "application/xml"}
+            client.get = AsyncMock(return_value=response)
+
+            s3_client = MagicMock()
+            item = {
+                "xmlUrl": "https://rss.example.com/feed.xml",
+                "title": "Test",
+            }
+
+            result = await main._process_one_feed(
+                client,
+                item,
+                "test-bucket",
+                s3_client,
+                "09-06-2026",
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["s3Key"], "feeds/example/09-06-2026-abcd.json")
+            mock_datetime.now.assert_called_with(main._TZ)
+
+            body_bytes = mock_to_thread.await_args.kwargs["Body"]
+            payload = json.loads(body_bytes.decode("utf-8"))
+            self.assertEqual(payload["fetchedAt"], fixed.isoformat())
+
+
+if __name__ == "__main__":
+    unittest.main()
