@@ -4,8 +4,9 @@ import logging
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,6 +16,8 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+_TZ = ZoneInfo("Europe/Berlin")
 
 _FEED_LIST_PATH = Path(__file__).resolve().parent / "feeds.json"
 _DEFAULT_FETCH_TIMEOUT_S = 30
@@ -232,7 +235,7 @@ async def _process_one_feed(
         "text": item.get("text"),
         "xmlUrl": xml_url,
         "htmlUrl": item.get("htmlUrl"),
-        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+        "fetchedAt": datetime.now(_TZ).isoformat(),
         "httpStatus": status,
         "contentType": ctype,
         "bodyText": body.decode("utf-8", errors="replace"),
@@ -301,7 +304,7 @@ def handler(event, context):
 
     timeout_s = int(os.environ.get("FEED_FETCH_TIMEOUT_S", _DEFAULT_FETCH_TIMEOUT_S))
     max_concurrent = _parse_concurrent_requests()
-    date_prefix = datetime.now(timezone.utc).strftime("%d-%m-%Y")
+    date_prefix = datetime.now(_TZ).strftime("%d-%m-%Y")
 
     try:
         feed_items = _load_feed_list()
