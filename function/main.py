@@ -14,6 +14,8 @@ import boto3
 import httpx
 from botocore.exceptions import ClientError
 
+from function.rss_xml import rss_xml_to_feed_items
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -219,7 +221,6 @@ async def _process_one_feed(
         resp = await client.get(xml_url)
         status = resp.status_code
         body = resp.content
-        ctype = resp.headers.get("Content-Type")
     except httpx.RequestError as e:
         return {
             "xmlUrl": xml_url,
@@ -245,17 +246,18 @@ async def _process_one_feed(
 
     sid = _short_id()
     key = f"feeds/{domain_folder}/{date_prefix}-{sid}.json"
-    payload = {
-        "title": title,
-        "text": item.get("text"),
-        "xmlUrl": xml_url,
-        "htmlUrl": item.get("htmlUrl"),
-        "fetchedAt": datetime.now(_TZ).isoformat(),
-        "httpStatus": status,
-        "contentType": ctype,
-        "bodyText": body.decode("utf-8", errors="replace"),
-    }
-    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    body_text = body.decode("utf-8", errors="replace")
+    try:
+        feed_items_json = rss_xml_to_feed_items(body_text)
+    except ValueError as e:
+        return {
+            "xmlUrl": xml_url,
+            "title": title,
+            "ok": False,
+            "error": str(e),
+        }
+
+    body_bytes = json.dumps(feed_items_json, ensure_ascii=False).encode("utf-8")
 
     await asyncio.to_thread(
         s3_client.put_object,
@@ -270,7 +272,8 @@ async def _process_one_feed(
         "title": title,
         "ok": True,
         "s3Key": key,
-        "bytes": len(body),
+        "bytes": len(body_bytes),
+        "itemCount": len(feed_items_json),
     }
 
 

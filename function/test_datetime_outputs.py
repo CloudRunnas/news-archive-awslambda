@@ -11,8 +11,18 @@ except ModuleNotFoundError:
     import main  # noqa: F401
 
 _MAIN = main.__name__
-
 _BERLIN = ZoneInfo("Europe/Berlin")
+
+_SAMPLE_RSS_BYTES = b"""<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Test Article</title>
+      <link>https://example.com/test</link>
+    </item>
+  </channel>
+</rss>
+"""
 
 
 class DatetimeOutputTests(unittest.TestCase):
@@ -73,25 +83,18 @@ class DatetimeOutputTests(unittest.TestCase):
         self.assertEqual(date_prefix, "09-06-2026")
         mock_datetime.now.assert_called_with(main._TZ)
 
-    def test_process_one_feed_fetched_at_uses_berlin(self):
-        fixed = datetime(2026, 6, 9, 0, 15, tzinfo=_BERLIN)
-        asyncio.run(self._run_process_one_feed_assertions(fixed))
+    def test_process_one_feed_uploads_parsed_json_array(self):
+        asyncio.run(self._run_process_one_feed_assertions())
 
-    async def _run_process_one_feed_assertions(self, fixed: datetime) -> None:
+    async def _run_process_one_feed_assertions(self) -> None:
         with (
-            patch(f"{_MAIN}.datetime") as mock_datetime,
             patch(f"{_MAIN}.secrets.token_hex", return_value="abcd"),
             patch(f"{_MAIN}.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
         ):
-            mock_datetime.now.return_value = fixed
-            mock_datetime.side_effect = (
-                lambda *args, **kwargs: datetime(*args, **kwargs)
-            )
-
             client = MagicMock()
             response = MagicMock()
             response.status_code = 200
-            response.content = b"<rss/>"
+            response.content = _SAMPLE_RSS_BYTES
             response.headers = {"Content-Type": "application/xml"}
             client.get = AsyncMock(return_value=response)
 
@@ -111,11 +114,36 @@ class DatetimeOutputTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["s3Key"], "feeds/example/09-06-2026-abcd.json")
-            mock_datetime.now.assert_called_with(main._TZ)
+            self.assertEqual(result["itemCount"], 1)
 
             body_bytes = mock_to_thread.await_args.kwargs["Body"]
             payload = json.loads(body_bytes.decode("utf-8"))
-            self.assertEqual(payload["fetchedAt"], fixed.isoformat())
+            self.assertIsInstance(payload, list)
+            self.assertEqual(payload[0]["title"], "Test Article")
+            self.assertEqual(payload[0]["link"], "https://example.com/test")
+
+
+class ProcessOneFeedRssIntegrationTests(unittest.TestCase):
+    def test_invalid_rss_xml_returns_error(self):
+        async def run() -> None:
+            client = MagicMock()
+            response = MagicMock()
+            response.status_code = 200
+            response.content = b"<rss><broken>"
+            response.headers = {"Content-Type": "application/xml"}
+            client.get = AsyncMock(return_value=response)
+
+            result = await main._process_one_feed(
+                client,
+                {"xmlUrl": "https://rss.example.com/feed.xml", "title": "Test"},
+                "test-bucket",
+                MagicMock(),
+                "09-06-2026",
+            )
+            self.assertFalse(result["ok"])
+            self.assertIn("invalid RSS XML", result["error"])
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":
