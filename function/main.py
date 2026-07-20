@@ -3,12 +3,10 @@ import json
 import logging
 import os
 import re
-import secrets
 from datetime import datetime
-from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any
-from urllib.parse import urlparse
 
 import boto3
 import httpx
@@ -36,12 +34,12 @@ def _load_berlin_tz() -> ZoneInfo:
 
 _TZ = _load_berlin_tz()
 
-_FEED_LIST_PATH = Path(__file__).resolve().parent / "feeds.json"
 _DEFAULT_FETCH_TIMEOUT_S = 30
 _DEFAULT_CONCURRENT_REQUESTS = 5
 _MAX_CONCURRENT_CAP = 500
 # Default bucket if no env var: globally unique per account + region (S3 naming rules).
 _DEFAULT_BUCKET_PREFIX = "rss-news-archive"
+_DEFAULT_FEEDS_JSON_KEY = "feeds.json"
 
 _HTTP_HEADERS = {
     "User-Agent": "rss-archive-lambda/1.0 (+https://github.com/aws-lambda)",
@@ -70,6 +68,29 @@ def _resolve_bucket_name() -> str:
     sts = boto3.client("sts")
     aid = sts.get_caller_identity()["Account"]
     return _default_bucket_name(aid, _aws_region())
+
+
+def _is_staging() -> bool:
+    return os.environ.get("STAGING", "").strip().lower() in ("1", "true", "yes")
+
+
+def _feeds_output_prefix() -> str:
+    return "feeds_staging" if _is_staging() else "feeds"
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
+        raise ValueError(f"Invalid S3 URI: {uri!r}")
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def _feeds_json_location(bucket: str) -> tuple[str, str]:
+    """Resolve bucket/key for the feed list JSON."""
+    explicit = os.environ.get("FEEDS_JSON_S3_URI", "").strip()
+    if explicit:
+        return _parse_s3_uri(explicit)
+    return bucket, _DEFAULT_FEEDS_JSON_KEY
 
 
 def _ensure_bucket_exists(s3_client: Any, bucket: str, region: str) -> None:
@@ -167,13 +188,25 @@ def _domain_label_without_tld(hostname: str) -> str:
     return safe or "unknown"
 
 
-def _short_id() -> str:
-    return secrets.token_hex(2)
+def _load_feed_list(s3_client: Any, bucket: str) -> list[dict[str, Any]]:
+    feeds_bucket, feeds_key = _feeds_json_location(bucket)
+    try:
+        response = s3_client.get_object(Bucket=feeds_bucket, Key=feeds_key)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        message = exc.response["Error"].get("Message", code)
+        raise RuntimeError(
+            f"Failed to load feeds.json from s3://{feeds_bucket}/{feeds_key}: {message}"
+        ) from exc
 
+    raw_body = response["Body"].read()
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Invalid JSON in s3://{feeds_bucket}/{feeds_key}"
+        ) from exc
 
-def _load_feed_list() -> list[dict[str, Any]]:
-    with _FEED_LIST_PATH.open(encoding="utf-8") as f:
-        data = json.load(f)
     if not isinstance(data, list):
         raise ValueError("feeds.json must contain a JSON array")
     return data
@@ -202,6 +235,7 @@ async def _process_one_feed(
     bucket: str,
     s3_client: Any,
     date_prefix: str,
+    output_prefix: str,
 ) -> dict[str, Any]:
     xml_url = item.get("xmlUrl") or ""
     title = item.get("title")
@@ -244,8 +278,8 @@ async def _process_one_feed(
             "error": f"HTTP status {status} or empty body",
         }
 
-    sid = _short_id()
-    key = f"feeds/{domain_folder}/{date_prefix}-{sid}.json"
+    # Stable daily path: {prefix}/{feedname}/{TT-MM-YYYY}.json (no UUID suffix)
+    key = f"{output_prefix}/{domain_folder}/{date_prefix}.json"
     body_text = body.decode("utf-8", errors="replace")
     try:
         feed_items_json = rss_xml_to_feed_items(body_text)
@@ -284,6 +318,7 @@ async def _run_async(
     max_concurrent: int,
     s3_client: Any,
     date_prefix: str,
+    output_prefix: str,
 ) -> tuple[list[dict[str, Any]], int]:
     timeout = httpx.Timeout(timeout_s)
     limits = httpx.Limits(max_connections=max(max_concurrent * 2, 16))
@@ -297,6 +332,7 @@ async def _run_async(
                 bucket,
                 s3_client,
                 date_prefix,
+                output_prefix,
             )
 
     async with httpx.AsyncClient(
@@ -323,15 +359,7 @@ def handler(event, context):
     timeout_s = int(os.environ.get("FEED_FETCH_TIMEOUT_S", _DEFAULT_FETCH_TIMEOUT_S))
     max_concurrent = _parse_concurrent_requests()
     date_prefix = datetime.now(_TZ).strftime("%d-%m-%Y")
-
-    try:
-        feed_items = _load_feed_list()
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Failed to load feeds.json")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)}),
-        }
+    output_prefix = _feeds_output_prefix()
 
     s3 = boto3.client("s3", region_name=region)
     try:
@@ -339,6 +367,15 @@ def handler(event, context):
     except RuntimeError as e:
         logger.error("%s", e)
         return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+
+    try:
+        feed_items = _load_feed_list(s3, bucket)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Failed to load feeds.json")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)}),
+        }
 
     results, ok_count = asyncio.run(
         _run_async(
@@ -348,12 +385,15 @@ def handler(event, context):
             max_concurrent,
             s3,
             date_prefix,
+            output_prefix,
         )
     )
 
     failed = [r for r in results if not r.get("ok")]
     summary = {
         "bucket": bucket,
+        "outputPrefix": output_prefix,
+        "staging": _is_staging(),
         "maxConcurrentRequests": max_concurrent,
         "total": len(feed_items),
         "stored": ok_count,
