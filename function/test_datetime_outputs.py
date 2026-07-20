@@ -87,10 +87,7 @@ class DatetimeOutputTests(unittest.TestCase):
         asyncio.run(self._run_process_one_feed_assertions())
 
     async def _run_process_one_feed_assertions(self) -> None:
-        with (
-            patch(f"{_MAIN}.secrets.token_hex", return_value="abcd"),
-            patch(f"{_MAIN}.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
-        ):
+        with patch(f"{_MAIN}.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
             client = MagicMock()
             response = MagicMock()
             response.status_code = 200
@@ -110,10 +107,11 @@ class DatetimeOutputTests(unittest.TestCase):
                 "test-bucket",
                 s3_client,
                 "09-06-2026",
+                "feeds",
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["s3Key"], "feeds/example/09-06-2026-abcd.json")
+            self.assertEqual(result["s3Key"], "feeds/example/09-06-2026.json")
             self.assertEqual(result["itemCount"], 1)
 
             body_bytes = mock_to_thread.await_args.kwargs["Body"]
@@ -121,6 +119,28 @@ class DatetimeOutputTests(unittest.TestCase):
             self.assertIsInstance(payload, list)
             self.assertEqual(payload[0]["title"], "Test Article")
             self.assertEqual(payload[0]["link"], "https://example.com/test")
+
+    async def _run_staging_prefix_assertions(self) -> None:
+        with patch(f"{_MAIN}.asyncio.to_thread", new_callable=AsyncMock):
+            client = MagicMock()
+            response = MagicMock()
+            response.status_code = 200
+            response.content = _SAMPLE_RSS_BYTES
+            client.get = AsyncMock(return_value=response)
+
+            result = await main._process_one_feed(
+                client,
+                {"xmlUrl": "https://rss.example.com/feed.xml", "title": "Test"},
+                "test-bucket",
+                MagicMock(),
+                "09-06-2026",
+                "feeds_staging",
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["s3Key"], "feeds_staging/example/09-06-2026.json")
+
+    def test_process_one_feed_uses_staging_prefix(self):
+        asyncio.run(self._run_staging_prefix_assertions())
 
 
 class ProcessOneFeedRssIntegrationTests(unittest.TestCase):
@@ -139,6 +159,7 @@ class ProcessOneFeedRssIntegrationTests(unittest.TestCase):
                 "test-bucket",
                 MagicMock(),
                 "09-06-2026",
+                "feeds",
             )
             self.assertFalse(result["ok"])
             self.assertIn("invalid RSS XML", result["error"])
