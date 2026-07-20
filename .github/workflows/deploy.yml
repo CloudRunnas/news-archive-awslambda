@@ -61,6 +61,9 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
           tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.target.outputs.image_tag }}
           cache-from: type=gha,scope=rss-lambda
           cache-to: type=gha,mode=max,scope=rss-lambda
